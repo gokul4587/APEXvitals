@@ -100,7 +100,7 @@ CUSTOM_CSS = f"""
     }}
 </style>
 """
-st.markdown(CUSTOM_CSS, unsafe_allow_stdio=True)
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POD-A: SENSOR (Telemetry Logic)
@@ -177,7 +177,7 @@ def get_ai_diagnosis(api_key, context):
         """
         
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-3-flash-preview",
             contents=prompt
         )
         return response.text
