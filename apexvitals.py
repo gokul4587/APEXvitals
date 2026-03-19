@@ -1,7 +1,8 @@
 """
 APEXVITALS - AI-Driven System Health Narrator
-A production-grade diagnostic tool for ECE portfolios
+Production-grade diagnostic tool for ECE portfolios
 Architecture: POD-A (Sensor) → POD-B (Context) → POD-C (Brain) → POD-D (Action)
+Enhanced Module: POD-G (GPU Telemetry)
 """
 
 import streamlit as st
@@ -9,13 +10,34 @@ import psutil
 import json
 import pandas as pd
 import os
+import subprocess
 from datetime import datetime
 from google import genai
 from google.genai import errors
 from dotenv import load_dotenv
 
+# Optional GPU imports with graceful fallbacks
+try:
+    import py3nvml.py3nvml as nvml
+    NVML_AVAILABLE = True
+except ImportError:
+    NVML_AVAILABLE = False
+
 # Load environment variables from .env
 load_dotenv()
+
+def get_power_plan():
+    """Detects the active Windows power plan."""
+    try:
+        if os.name == 'nt':
+            result = subprocess.check_output("powercfg /getactivescheme", shell=True).decode()
+            if "High performance" in result: return "Performance Mode"
+            if "Balanced" in result: return "Balanced Mode"
+            if "Power saver" in result: return "Power Saver Mode"
+            return "Custom Plan"
+        return "OS Default"
+    except:
+        return "Unknown"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION & THEME
@@ -37,6 +59,7 @@ TEXT_PRIMARY = "#e0e0e0"
 TEXT_SECONDARY = "#888888"
 STATUS_GREEN = "#00ff88"
 STATUS_RED = "#ff3366"
+GPU_ACCENT = "#00ff88"
 
 CUSTOM_CSS = f"""
 <style>
@@ -98,6 +121,13 @@ CUSTOM_CSS = f"""
         color: {CYAN} !important;
         border: 1px solid {CYAN_DIM} !important;
     }}
+    .gpu-metric {{
+        background: rgba(0, 255, 136, 0.1);
+        border: 1px solid {GPU_ACCENT};
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+    }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -110,7 +140,7 @@ def get_system_telemetry():
     """Captures real-time hardware telemetry."""
     cpu_usage = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
-    
+
     # Get Top 5 high-impact processes
     processes = []
     for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
@@ -118,10 +148,10 @@ def get_system_telemetry():
             processes.append(proc.info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    
+
     # Sort and take top 5
     top_processes = sorted(processes, key=lambda x: x['cpu_percent'], reverse=True)[:5]
-    
+
     return {
         "cpu_usage": cpu_usage,
         "ram_usage": memory.percent,
@@ -131,66 +161,125 @@ def get_system_telemetry():
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# POD-G: GPU TELEMETRY (NVIDIA NVML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_gpu_telemetry():
+    """Captures NVIDIA GPU telemetry using py3nvml."""
+    if not NVML_AVAILABLE:
+        return {"error": "py3nvml not installed"}
+
+    try:
+        nvml.nvmlInit()
+        device_count = nvml.nvmlDeviceGetCount()
+
+        if device_count == 0:
+            nvml.nvmlShutdown()
+            return {"error": "No NVIDIA GPU detected"}
+
+        handle = nvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_name = nvml.nvmlDeviceGetName(handle)
+        temp_info = nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
+        memory_info = nvml.nvmlDeviceGetMemoryInfo(handle)
+        vram_used_gb = round(memory_info.used / (1024**3), 2)
+        vram_total_gb = round(memory_info.total / (1024**3), 2)
+        vram_percent = round((memory_info.used / memory_info.total) * 100, 1)
+        power_draw_mw = nvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
+
+        nvml.nvmlShutdown()
+
+        return {
+            "gpu_name": gpu_name.decode() if isinstance(gpu_name, bytes) else gpu_name,
+            "temperature": temp_info,
+            "vram_used_gb": vram_used_gb,
+            "vram_total_gb": vram_total_gb,
+            "vram_percent": vram_percent,
+            "power_draw_w": round(power_draw_mw, 1),
+            "timestamp": datetime.now().strftime("%H:%M:%S")
+        }
+    except Exception as e:
+        return {"error": f"GPU Telemetry Offline: {str(e)}"}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # POD-B: CONTEXT (Data Preparation)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def prepare_brain_context(telemetry):
-    """Formats raw sensor data into a JSON prompt context for POD-C."""
-    context_string = f"""
-    SYSTEM_SNAPSHOT:
-    - CPU LOAD: {telemetry['cpu_usage']}%
-    - RAM LOAD: {telemetry['ram_usage']}%
-    - RAM AVAILABLE: {telemetry['ram_available_gb']} GB
-    
-    TOP_PROCESS_LIST:
-    {json.dumps(telemetry['top_processes'], indent=2)}
-    
-    TIMESTAMP: {telemetry['timestamp']}
-    """
-    return context_string
+def prepare_brain_context(telemetry, gpu_data):
+    """Formats telemetry and GPU stats into a structured context for the AI."""
+    context = {
+        "HARDWARE": telemetry,
+        "GPU": gpu_data
+    }
+    return json.dumps(context, indent=2)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POD-C: BRAIN (AI Reasoning)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_ai_diagnosis(api_key, context):
-    """AI reasoning via Gemini 1.5 Flash."""
-    # Pre-flight Sanitizer
+def get_ai_diagnosis(api_key, context_json):
+    """AI reasoning via Gemini API - POD-C Lead Diagnostic Engine."""
     sanitized_key = api_key.strip()
-    
     if not sanitized_key:
-        return "ERROR: API Key Missing. Please provide a valid Gemini API Key in the sidebar."
+        return {
+            "neural_log": "ERROR: Handshake Aborted. API Key Missing.",
+            "human_readable": "Please provide a Gemini API Key to initialize the brain module."
+        }
 
     try:
         client = genai.Client(api_key=sanitized_key)
+        power_mode = get_power_plan()
         
         prompt = f"""
-        Act as a Cyberpunk System Architect. Analyze this telemetry context:
-        {context}
-        
-        Provide a concise 3-sentence diagnostic:
-        1. Current health status (CRITICAL, STABLE, or OPTIMAL).
-        2. Identify the primary resource bottleneck.
-        3. Suggest a specific optimization action.
-        
-        Keep it professional, technical, and thematic.
+        You are POD-C, the lead diagnostic engine for APEXVITALS. 
+        Context: HP Omen 16 (RTX 5060). 
+        Current Mode: {power_mode}
+
+        --- INPUT DATA ---
+        {context_json}
+
+        --- TASK ---
+        Provide a factual, two-part system audit. AVOID metaphors, analogies, or 'cheesy' language.
+
+        [NEURAL_LOG]
+        - High-fidelity technical breakdown for engineers.
+        - Reference specific metrics (Wattage, VRAM, Clock speeds).
+        - Identify bottlenecks (e.g., CPU-bound, Thermal ceiling, I/O wait).
+
+        [HUMAN_READABLE]
+        - Simple, professional English for a standard user.
+        - Direct status report: Tell the user exactly why the system is behaving this way.
+        - Provide one clear, actionable fix (e.g., 'Lower shadow settings' or 'Change to Performance Mode').
+
+        STRICT: No 'Chef', 'High-end sports car', or 'Athlete' metaphors. Be direct.
+        Total response must be under 180 words.
         """
-        
+
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=prompt
         )
-        return response.text
-    
-    except errors.ClientError as e:
-        if "404" in str(e):
-            return "ERROR [404]: Generative AI Service not enabled for this project/region."
-        elif "400" in str(e):
-            return "ERROR [400]: Invalid API Key format. System Handshake Failed."
-        else:
-            return f"ERROR [Client]: {str(e)}"
+        
+        response_text = response.text
+        neural_log = ""
+        human_readable = ""
+
+        if "[NEURAL_LOG]" in response_text:
+            parts = response_text.split("[NEURAL_LOG]")[1].split("[HUMAN_READABLE]")
+            neural_log = parts[0].strip()
+            if len(parts) > 1:
+                human_readable = parts[1].strip()
+        
+        if not neural_log or not human_readable:
+            neural_log = "Error parsing neural response."
+            human_readable = response_text
+
+        return {"neural_log": neural_log, "human_readable": human_readable}
+
     except Exception as e:
-        return f"ERROR [System]: {str(e)}"
+        return {
+            "neural_log": f"ERROR [System]: {str(e)}",
+            "human_readable": "Neural handshake failed. Check your API key or connection."
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POD-D: ACTION (Execution Engine)
@@ -207,6 +296,37 @@ def kill_process(pid):
         return f"❌ FAILED: Unable to kill PID {pid}. {str(e)}"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# UI HELPPER FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_gpu_panel(gpu_data):
+    """Renders the GPU telemetry panel with cyberpunk styling."""
+    if gpu_data and "error" not in gpu_data:
+        st.markdown(f"""
+        <div class="gpu-metric">
+            <div style="color: {GPU_ACCENT}; font-weight: bold; margin-bottom: 10px;">
+                🎮 {gpu_data['gpu_name']}
+            </div>
+            <div style="display: flex; justify-content: space-around; text-align: center;">
+                <div>
+                    <div style="font-size: 24px; color: #fff;">{gpu_data['temperature']}°C</div>
+                    <div style="font-size: 12px; color: {CYAN};">TEMPERATURE</div>
+                </div>
+                <div>
+                    <div style="font-size: 24px; color: #fff;">{gpu_data['vram_used_gb']}/{gpu_data['vram_total_gb']} GB</div>
+                    <div style="font-size: 12px; color: {CYAN};">VRAM USAGE</div>
+                </div>
+                <div>
+                    <div style="font-size: 24px; color: #fff;">{gpu_data['power_draw_w']} W</div>
+                    <div style="font-size: 12px; color: {CYAN};">POWER DRAW</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.warning(gpu_data.get("error", "NVIDIA Telemetry Offline"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN UI APPLICATION
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -217,100 +337,87 @@ def main():
     # SIDEBAR: Control Center
     with st.sidebar:
         st.header("⚙️ SYSTEM CONTROL")
-        
-        # Check environment variable first
         env_key = os.getenv("GEMINI_API_KEY")
         if env_key and "PASTE_YOUR_NEW_KEY_HERE" not in env_key:
             api_key = env_key
-            st.success("API Key loaded from environment.")
+            st.success("API Key active from environment.")
         else:
             api_key = st.text_input("GEMINI_API_KEY", type="password", placeholder="Enter AIza...")
-            
-        st.info("POD System Architecture v1.0.4 | APEXVITALS-OS")
-        
+
+        st.info("POD System Architecture v3.0 | APEXVITALS-OS")
         if st.button("RESET ENGINE"):
             st.rerun()
 
-    # POD-A: TELEMETRY (Top Row)
+    # TELEMETRY RETRIEVAL
     telemetry = get_system_telemetry()
-    
+    gpu_data = get_gpu_telemetry()
+
+    # TOP ROW: System Metrics
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{telemetry['cpu_usage']}%</div>
-            <div class="metric-label">CPU UTILIZATION</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{telemetry["cpu_usage"]}%</div><div class="metric-label">CPU LOAD</div></div>', unsafe_allow_html=True)
     with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{telemetry['ram_usage']}%</div>
-            <div class="metric-label">MEMORY LOAD</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{telemetry["ram_usage"]}%</div><div class="metric-label">RAM LOAD</div></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{telemetry['ram_available_gb']} GB</div>
-            <div class="metric-label">AVAILABLE BUFFER</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{telemetry["ram_available_gb"]} GB</div><div class="metric-label">RAM FREE</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # PROCESS LIST & BRAIN ANALYSIS (Middle Section)
-    left_col, right_col = st.columns([1, 1])
-
-    with left_col:
-        st.subheader("📡 POD-A: SENSOR DATA")
+    # MIDDLE ROW: GPU Panel & Process List
+    mid_col1, mid_col2 = st.columns([1, 1])
+    with mid_col1:
+        st.subheader("🎮 GPU TELEMETRY")
+        render_gpu_panel(gpu_data)
+    with mid_col2:
+        st.subheader("📡 TOP PROCESSES")
         df = pd.DataFrame(telemetry['top_processes'])
         df.columns = ['PID', 'NAME', 'CPU %', 'RAM %']
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with right_col:
-        st.subheader("🧠 POD-C: BRAIN DIAGNOSTIC")
-        if st.button("RUN AI NARRATOR", use_container_width=True):
-            if api_key:
-                with st.status("Initializing POD-C Handshake...", expanded=True) as status:
-                    st.write("Fetching context from POD-B...")
-                    context = prepare_brain_context(telemetry)
-                    st.write("Synthesizing reasoning via Gemini Flash...")
-                    diagnosis = get_ai_diagnosis(api_key, context)
-                    status.update(label="Diagnostic Complete", state="complete", expanded=True)
-                    st.markdown(f"**AI FEEDBACK:**\n\n{diagnosis}")
-            else:
-                st.warning("PLEASE PROVIDE AN API KEY IN THE CONTROL PANEL.")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # BOTTOM SECTION: Brain Diagnostic
+    st.subheader("🧠 POD-C: BRAIN DIAGNOSTIC")
+    if st.button("RUN AI NARRATOR", use_container_width=True):
+        if api_key:
+            with st.status("Performing Neural Correlation...", expanded=True) as status:
+                context = prepare_brain_context(telemetry, gpu_data)
+                diagnosis = get_ai_diagnosis(api_key, context)
+                status.update(label="Handshake Complete", state="complete", expanded=True)
+
+                d_col1, d_col2 = st.columns(2)
+                with d_col1:
+                    st.markdown(f"""
+                    <div class="glass-panel" style="border-color: {CYAN};">
+                        <div style="color: {CYAN}; font-weight: bold; margin-bottom: 10px;">⚡ [NEURAL_LOG]</div>
+                        <div style="font-family: monospace; font-size: 13px;">{diagnosis['neural_log']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with d_col2:
+                    st.markdown(f"""
+                    <div class="glass-panel" style="border-color: {STATUS_GREEN};">
+                        <div style="color: {STATUS_GREEN}; font-weight: bold; margin-bottom: 10px;">👤 [HUMAN_READABLE]</div>
+                        <div>{diagnosis['human_readable']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
-            st.markdown("""
-            <div class="glass-panel" style="color: #666; text-align: center;">
-                Awaiting neural uplink... click "RUN AI NARRATOR" to begin analysis.
-            </div>
-            """, unsafe_allow_html=True)
+            st.warning("API KEY REQUIRED FOR BRAIN MODULE.")
 
     st.markdown("---")
 
-    # POD-D: ACTION ENGINE (Bottom Section)
+    # ACTION ENGINE
     st.subheader("⚡ POD-D: ACTION ENGINE")
     with st.expander("MANUAL OVERRIDE: TERMINATE PROCESS"):
         kill_pid = st.number_input("Enter Process ID (PID)", min_value=0, step=1)
-        if st.button("EXECUTE KILL COMMAND", type="secondary"):
+        if st.button("EXECUTE KILL COMMAND"):
             if kill_pid > 0:
                 result = kill_process(kill_pid)
-                if "SUCCESS" in result:
-                    st.success(result)
-                else:
-                    st.error(result)
-            else:
-                st.warning("ENTER A VALID PID.")
+                st.success(result) if "SUCCESS" in result else st.error(result)
 
     # Footer
     st.markdown(f"""
     <div style="text-align: right; color: {TEXT_SECONDARY}; font-size: 10px; margin-top: 50px;">
-        OS_TIMESTAMP: {telemetry['timestamp']} | CORE_ENGINE: GEMINI-1.5-FLASH-V1
+        OS_TIMESTAMP: {telemetry['timestamp']} | CORE_ENGINE: GEMINI-2.0-FLASH | POD_ARCH: v3.0
     </div>
     """, unsafe_allow_html=True)
 
