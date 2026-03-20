@@ -55,6 +55,6 @@ Developed as a research project within the **Electronics and Communication Engin
 
 ---
 
-**Author:** [Your Name/GitHub]  
+**Author:** R.Anirwin
 **Department:** Electronics and Communication Engineering (ECE)  
 **Institution:** SRM Institute of Science and Technology (SRMIST)
