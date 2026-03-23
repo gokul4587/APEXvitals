@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .streamlit/
+test3.py
+test_api_key.py
+test_api_key2.py
+debug_logs.py
+debug_models.py
