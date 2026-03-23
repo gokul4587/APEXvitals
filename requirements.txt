@@ -5,3 +5,4 @@ pandas
 python-dotenv
 py3nvml
 pywin32
+fpdf2>=2.7.0
