@@ -452,48 +452,13 @@ def get_system_telemetry():
 # VITALITY INDEX CALCULATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calculate_vitality_index(cpu, ram, gpu_temp, gpu_util=None):
-    """Calculates System Vitality Index (0-100) with recalibrated penalty formula.
-    
-    Recalibration (v3.5): If ANY resource > 70%, SVI cannot be 100%.
-    - CPU > 70%: progressive penalty (-0.5pt per 1% from 70-85, -1.5pt per 1% above 85)
-    - RAM > 70%: progressive penalty (-0.3pt per 1% from 70-90, -2.5pt per 1% above 90)
-    - GPU Temp > 70°C: progressive penalty (-0.5pt per 1°C from 70-82, -1.2pt per 1°C above 82)
-    - GPU Util > 70%: progressive penalty (-0.3pt per 1% from 70-90, -1.0pt per 1% above 90)
+def calculate_vitality_index(cpu, ram, gpu_temp, io_load=0):
+    """Calculates System Vitality Index (0-100) using embedded hardcoded logic.
+    SVI = 100 - (0.4 * CPU + 0.3 * RAM + 0.2 * (GPU_Temp - 40) + 0.1 * IO_Load)
     """
-    score = 100.0
-
-    # CPU penalties (tiered)
-    if cpu > 85:
-        score -= (85 - 70) * 0.5  # 70-85 range: -7.5
-        score -= (cpu - 85) * 1.5  # above 85: aggressive
-    elif cpu > 70:
-        score -= (cpu - 70) * 0.5
-
-    # RAM penalties (tiered)
-    if ram > 90:
-        score -= (90 - 70) * 0.3  # 70-90 range: -6.0
-        score -= (ram - 90) * 2.5  # above 90: aggressive
-    elif ram > 70:
-        score -= (ram - 70) * 0.3
-
-    # GPU Temp penalties (tiered)
-    if gpu_temp is not None:
-        if gpu_temp > 82:
-            score -= (82 - 70) * 0.5  # 70-82 range: -6.0
-            score -= (gpu_temp - 82) * 1.2  # above 82: aggressive
-        elif gpu_temp > 70:
-            score -= (gpu_temp - 70) * 0.5
-
-    # GPU Utilization penalties (tiered)
-    if gpu_util is not None:
-        if gpu_util > 90:
-            score -= (90 - 70) * 0.3  # 70-90 range: -6.0
-            score -= (gpu_util - 90) * 1.0  # above 90: aggressive
-        elif gpu_util > 70:
-            score -= (gpu_util - 70) * 0.3
-
-    return max(0.0, round(score, 1))
+    gpu_temp_delta = max(0, gpu_temp - 40) if gpu_temp is not None else 0
+    score = 100 - ((0.4 * cpu) + (0.3 * ram) + (0.2 * gpu_temp_delta) + (0.1 * io_load))
+    return max(0, min(100, int(round(score, 0))))
 
 def get_vitality_status(svi):
     """Returns status label and color based on SVI score."""
@@ -579,26 +544,18 @@ TASK:
 4. Select the most effective 'Action Engine' remediation.
 
 CONSTRAINTS:
-- DO NOT use conversational language (e.g., "I think", "It seems", "Based on"). Tone must be minimalist, data-driven, and authoritative.
-- USE Forensic Engineering terminology only (e.g., 'Thermal Throttling', 'VRAM Saturation', 'Interrupt Storm', 'Power Mismatch', 'P-State Cap').
+- Act as a Senior Hardware Systems Engineer.
+- DO NOT use conversational language. Tone must be authoritative.
+- USE Forensic Engineering terminology (e.g., 'Thermal Throttling', 'VRAM Saturation', 'Interrupt Storm').
 - Your diagnosis MUST explicitly frame its logic using this triad:
    1. Identify the Conflict (e.g., 'Voltage is capped while load is high.').
    2. State the Consequence (e.g., 'This is causing Artificial Latency.').
    3. Provide the Remediation (e.g., 'Switching to Unleashed Mode will fix the clock-speed cap.').
-- STRICTLY return only a valid JSON object.
-
-OUTPUT SCHEMA (JSON):
-{{
-  "root_cause": "[Conflict] + [Consequence]. (Keep it concise and authoritative).",
-  "evidence": ["Metric A exceeded threshold X", "Metric B shows inverse correlation with clock speed"],
-  "risk_category": "CRITICAL | WARNING | NOMINAL",
-  "confidence_score": "0-100%",
-  "remediation_playbook": {{
-    "primary_action": "[The explicit Remediation to resolve the Conflict]",
-    "expected_svi_impact": "+N points",
-    "risk_level": "Low/Medium/High"
-  }}
-}}"""
+- 5-Minute Forecast: Add a section titled '**5-Minute Forecast**' to predict if the SVI will improve or degrade based on current telemetry.
+- Ensure the output is clean Markdown text, not a JSON code block.
+- Bold the key headers like **Root Cause**, **Evidence**, **Remediation**, and **5-Minute Forecast**.
+- If necessary, issue a kill request using exactly this format: [KILL_REQUEST: PID]
+"""
 
         context_part = f"PERIPHERAL SYSTEM DATA:\n{context_json}\n\n"
 
@@ -627,60 +584,20 @@ OUTPUT SCHEMA (JSON):
         os_advisory = None
         hw_integrity = None
 
-        try:
-            # Try to parse as JSON first
-            json_text = text
-            if "```json" in text:
-                json_text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                json_text = text.split("```")[1].split("```")[0]
-            
-            data = json.loads(json_text.strip())
-            
-            ev_str = "\n".join([f"- {ev}" for ev in data.get("evidence", [])])
-            neural_log = f"Root Cause: {data.get('root_cause', '')}\nRisk: {data.get('risk_category', '')} (Confidence: {data.get('confidence_score', '')})\nEvidence:\n{ev_str}"
-            
-            pb = data.get("remediation_playbook", {})
-            human_readable = f"**{data.get('root_cause', '')}**\n\n**Action Required:** {pb.get('primary_action', '')}\n**Expected SVI Impact:** {pb.get('expected_svi_impact', '')}\n**Risk Level:** {pb.get('risk_level', '')}"
-            
-            evidence_list = data.get("evidence", [])
-            
-        except Exception:
-            # Fallback for older format
-            evidence_list = []
-            kill_matches = re.findall(r'\[KILL_REQUEST:\s*(\d+)\]', text)
-            kill_pids = [int(pid) for pid in kill_matches]
+        if not response or not response.text:
+            return {"error": "EMPTY_RESPONSE"}
 
-            for pid in kill_matches:
-                text = re.sub(rf'\[KILL_REQUEST:\s*{pid}\]\s*\n?', '', text)
+        text = response.text
 
-            neural_match = re.search(r'\[NEURAL_LOG\](.*?)(?:\[/NEURAL_LOG\]|\[END_NEURAL_LOG\]|\[HUMAN_READABLE\])', text, re.DOTALL)
-            if neural_match:
-                neural_log = neural_match.group(1).strip()
+        kill_matches = re.findall(r'\[KILL_REQUEST:\s*(\d+)\]', text)
+        kill_pids = [int(pid) for pid in kill_matches]
 
-            human_match = re.search(r'\[HUMAN_READABLE\](.*?)$', text, re.DOTALL)
-            if human_match:
-                human_readable = human_match.group(1).strip()
-            elif "[NEURAL_LOG]" in text and "[HUMAN_READABLE]" in text:
-                parts = text.split("[HUMAN_READABLE]")
-                if len(parts) > 1:
-                    human_readable = parts[1].strip()
-
-            os_match = re.search(r'\[OS_ADVISORY\](.*?)\[END_OS_ADVISORY\]', text, re.DOTALL)
-            if os_match:
-                os_advisory = os_match.group(1).strip()
-
-            hw_match = re.search(r'\[HARDWARE_INTEGRITY\](.*?)\[END_HARDWARE_INTEGRITY\]', text, re.DOTALL)
-            if hw_match:
-                hw_integrity = hw_match.group(1).strip()
+        for pid in kill_matches:
+            text = re.sub(rf'\[KILL_REQUEST:\s*{pid}\]\s*\n?', '', text)
 
         return {
-            "neural_log": neural_log,
-            "human_readable": human_readable,
-            "kill_pids": kill_pids,
-            "os_advisory": os_advisory,
-            "hw_integrity": hw_integrity,
-            "evidence": evidence_list
+            "human_readable": text.strip(),
+            "kill_pids": kill_pids
         }
 
     except Exception as e:
@@ -1620,6 +1537,13 @@ def render_system_intelligence_page():
     </div>
     """, unsafe_allow_html=True)
 
+def stream_word_by_word(text, delay=0.03):
+    """Generator to simulate real-time typing of AI responses."""
+    import time
+    for word in text.split(" "):
+        yield word + " "
+        time.sleep(delay)
+
 def render_heuristic_demo_page(api_key):
     st.subheader("🧪 HEURISTIC VERIFICATION MATRIX")
     st.markdown("Validate the AI diagnostic engine against expected reference standards.")
@@ -1681,29 +1605,38 @@ def render_heuristic_demo_page(api_key):
 
                     result = get_ai_diagnosis(api_key, mock_context, "Perform simulation")
 
-                    st.markdown("#### AI Output")
-                    st.json(result)
+                    with st.expander("Detailed Forensic Audit", expanded=True):
+                        st.markdown("""
+                        <style>
+                        /* Enforce clean white text within the expander for max readability */
+                        div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] p,
+                        div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] li,
+                        div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] strong {
+                            color: #ffffff !important;
+                            font-family: inherit;
+                        }
+                        </style>
+                        """, unsafe_allow_html=True)
+                        st.write_stream(stream_word_by_word(result.get('human_readable', '')))
 
                     st.divider()
                     st.markdown("#### Validation")
 
                     expected = scenario["expected_root_cause"]
-                    actual = result.get("root_cause", "N/A")
+                    actual_text = result.get("human_readable", "")
 
-                    if expected.lower() in actual.lower() or actual.lower() in expected.lower():
+                    if expected.lower() in actual_text.lower():
                         st.success("Root cause MATCHED")
                     else:
-                        st.warning("Root cause differs (expected vs actual):")
-                        st.write(f"Expected: {expected}")
-                        st.write(f"Actual: {actual}")
+                        st.warning("Root cause formulation issue:")
+                        st.write(f"Expected to find: **{expected}**")
 
                     expected_risk = scenario["expected_risk_category"]
-                    actual_risk = result.get("risk_category", "N/A")
 
-                    if expected_risk == actual_risk:
+                    if expected_risk.lower() in actual_text.lower():
                         st.success(f"Risk category MATCHED: {expected_risk}")
                     else:
-                        st.error(f"Risk mismatch: Expected {expected_risk}, Got {actual_risk}")
+                        st.error(f"Risk mismatch: Expected **{expected_risk}** to be explicitly stated.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
@@ -1834,12 +1767,12 @@ def main():
 
     # Calculate SVI (v3.5 recalibrated — includes GPU utilization)
     gpu_temp = telemetry["gpu"].get("temperature") if "error" not in telemetry["gpu"] else None
-    gpu_util = telemetry["gpu"].get("gpu_util") if "error" not in telemetry["gpu"] else None
+    io_load = telemetry["disk"]["used_percent"]
     svi = calculate_vitality_index(
         telemetry["cpu_usage"],
         telemetry["ram_usage"],
         gpu_temp,
-        gpu_util
+        io_load
     )
     svi_status, svi_color = get_vitality_status(svi)
 
@@ -2131,69 +2064,25 @@ def main():
             </div>
             """, unsafe_allow_html=True)
 
-            if diag.get("neural_log"):
-                st.markdown(f'<div style="margin-top:16px;"><div class="audit-section-label">📋 Investigation Grid — Telemetry Correlation</div></div>', unsafe_allow_html=True)
-
-                inv_col1, inv_col2 = st.columns(2)
-
-                with inv_col1:
-                    st.markdown(f"""
-                    <div class="investigation-card">
-                        <div class="investigation-card-title">🎯 Primary Culprit Identification</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    neural_lines = diag["neural_log"].strip().split('\n')
-                    mid = max(len(neural_lines) // 2, 3)
-                    culprit_block = '\n'.join(neural_lines[:mid])
-                    st.code(culprit_block, language="bash")
-
-                with inv_col2:
-                    st.markdown(f"""
-                    <div class="investigation-card">
-                        <div class="investigation-card-title">📊 Hardware Impact Assessment</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    impact_block = '\n'.join(neural_lines[mid:])
-                    if impact_block.strip():
-                        st.code(impact_block, language="bash")
-                    else:
-                        summary = f"CPU: {telemetry['cpu_usage']:.1f}%  |  RAM: {telemetry['ram_usage']:.1f}%"
-                        if 'error' not in telemetry['gpu']:
-                            summary += f"\nGPU Util: {telemetry['gpu'].get('gpu_util', 'N/A')}%"
-                            summary += f"\nGPU Temp: {telemetry['gpu']['temperature']}°C"
-                            summary += f"\nVRAM: {telemetry['gpu']['vram_percent']}%"
-                            summary += f"\nPower: {telemetry['gpu']['power_draw_w']}W"
-                        st.code(summary, language="bash")
-
             if diag.get("human_readable"):
-                st.markdown(f"""
-                <div class="insight-card">
-                    <div class="insight-label">💡 Strategic Advisory — AI Recommendation</div>
-                    <div class="insight-text">{diag['human_readable']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            if diag.get("evidence"):
-                with st.expander("🔍 View Forensic Evidence Trail", expanded=False):
-                    for item in diag['evidence']:
-                        st.markdown(f"• {item}")
-
-
-            if diag.get("os_advisory"):
-                st.markdown(f"""
-                <div class="advisory-panel">
-                    <div class="advisory-label">⚠️ OS Advisory — Kernel Overhead</div>
-                    <div style="color:{TEXT_SECONDARY};font-family:{FONT_MONO};font-size:12px;line-height:1.6;">{diag['os_advisory']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            if diag.get("hw_integrity"):
-                st.markdown(f"""
-                <div class="advisory-panel" style="border-left-color:{ACCENT_DANGER};">
-                    <div class="advisory-label" style="color:{ACCENT_DANGER};">🔥 Hardware Integrity — Thermal Alert</div>
-                    <div style="color:{TEXT_SECONDARY};font-family:{FONT_MONO};font-size:12px;line-height:1.6;">{diag['hw_integrity']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                with st.expander("Detailed Forensic Audit", expanded=True):
+                    diag_id = str(id(diag))
+                    
+                    st.markdown("""
+                    <style>
+                    /* Enforce clean white text within the expander for max readability */
+                    div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] p {
+                        color: #ffffff !important;
+                        font-family: inherit;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    if not st.session_state.get(f"streamed_{diag_id}"):
+                        st.write_stream(stream_word_by_word(diag['human_readable']))
+                        st.session_state[f"streamed_{diag_id}"] = True
+                    else:
+                        st.markdown(diag['human_readable'])
 
             # ── Remediation Engine (Kill Requests) ──
             if st.session_state.pending_kills:
