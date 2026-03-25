@@ -4,7 +4,9 @@
       "Bash(pip show:*)",
       "Bash(python:*)",
       "Bash(where python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(dir \"C:\\\\Users\\\\anirw\\\\OneDrive\\\\College\\\\python\\\\ApexVitals\\\\pages\")",
+      "Bash(dir:*)"
     ]
   }
 }
