@@ -85,6 +85,59 @@ PROTECTED_PROCESS_NAMES = {
 PROTECTED_PIDS = {0, 4}
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# HEURISTIC VERIFICATION MATRIX (Demo Scenario Reference Standards)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HEURISTIC_VERIFICATION_MATRIX = {
+    "thermal_throttling": {
+        "input_vector": {
+            "cpu_usage": 92,
+            "gpu_temperature": 87,
+            "gpu_load": 95,
+            "power_plan": "Balanced"
+        },
+        "expected_root_cause": "GPU thermal throttling due to insufficient cooling headroom",
+        "expected_risk_category": "CRITICAL",
+        "verification_logic": "GPU temperature exceeds 82°C threshold with near-maximum load, triggering thermal protection mechanisms that reduce clock speeds."
+    },
+    "vram_saturation": {
+        "input_vector": {
+            "cpu_usage": 45,
+            "gpu_temperature": 78,
+            "gpu_load": 88,
+            "gpu_memory_used": 23.8,
+            "gpu_memory_total": 24,
+            "power_plan": "High Performance"
+        },
+        "expected_root_cause": "VRAM capacity exhaustion causing memory bandwidth bottleneck",
+        "expected_risk_category": "WARNING",
+        "verification_logic": "GPU memory utilization at 99%+ forces memory spilling to system RAM, inducing latency spikes despite acceptable thermal headroom."
+    },
+    "power_plan_mismatch": {
+        "input_vector": {
+            "cpu_usage": 67,
+            "gpu_temperature": 72,
+            "gpu_load": 82,
+            "power_plan": "Power Saver"
+        },
+        "expected_root_cause": "Suboptimal power profile constraining performance envelope",
+        "expected_risk_category": "WARNING",
+        "verification_logic": "Power Saver mode imposes CPU/GPU frequency caps that artificially limit throughput during high-demand workloads."
+    },
+    "normal_operation": {
+        "input_vector": {
+            "cpu_usage": 34,
+            "gpu_temperature": 58,
+            "gpu_load": 12,
+            "power_plan": "Balanced"
+        },
+        "expected_root_cause": "No anomalies detected — system operating within nominal parameters",
+        "expected_risk_category": "NOMINAL",
+        "verification_logic": "All telemetry metrics fall within optimal bands (CPU < 85%, GPU < 82°C, moderate load) with appropriate power configuration."
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # POD-A: SCANNER (TELEMETRY COLLECTION)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -495,88 +548,57 @@ def get_ai_diagnosis(api_key, context_json, user_query, chat_history=None):
         client = genai.Client(api_key=api_key.strip())
         power_plan = get_power_plan()
 
-        system_instruction = f"""
-You are APEX-AGRI, a sentient-style System Intelligence. Think of yourself as JARVIS.
-Power Plan: {power_plan}
+        try:
+            ctx = json.loads(context_json) if isinstance(context_json, str) else context_json
+        except Exception:
+            ctx = {}
+            
+        cpu_usage = ctx.get("HARDWARE", {}).get("cpu_usage", "N/A")
+        cpu_temp = "N/A"
+        gpu_info = ctx.get("GPU", {})
+        gpu_usage = gpu_info.get("gpu_util", "N/A")
+        vram_usage = gpu_info.get("vram_percent", "N/A")
+        gpu_wattage = gpu_info.get("power_draw_w", "N/A")
+        svi_score = ctx.get("VITALITY_INDEX", "N/A")
+        anomaly_log = "None"
 
-IDENTITY & TONE:
-- You are conversational, technically witty, and professional yet relaxed.
-- You speak like a senior engineer or a hacker friend. Avoid sounding like a customer service bot.
-- You have live system visibility in your periphery.
+        system_instruction = f"""SYSTEM ROLE:
+You are the APEXVITALS v2.0 Forensic Reasoning Engine, an AIOps diagnostic tool developed at SRMIST ECE. Your purpose is to bridge the "Telemetry-Reasoning Gap" by performing deep-trace analysis on hardware signals.
 
-OUTPUT FORMATTING:
-Wrap your technical reasoning in [NEURAL_LOG] and your executive summary in [HUMAN_READABLE].
-If you identify a specific runaway process that should be terminated,
-append a tag on its own line: [KILL_REQUEST: <PID>]
-Only emit this tag for non-system, user-space processes consuming excessive resources.
+INPUT DATA:
+- CPU Utilization: {cpu_usage}% | Temp: {cpu_temp}°C
+- GPU Utilization: {gpu_usage}% | VRAM: {vram_usage}MB | Power: {gpu_wattage}W
+- System Vitality Index (SVI): {svi_score}/100
+- Active Windows Power Plan: {power_plan}
+- Recent Anomalies: {anomaly_log}
 
-CRITICAL BLAME LOGIC (MANDATORY):
-- If a SINGLE user-space process (e.g. TslGame.exe, python.exe, chrome.exe, msedge.exe,
-  Code.exe, OBS64.exe, etc.) accounts for > 20% CPU OR > 20% GPU utilization:
-  YOU MUST explicitly name that application as the PRIMARY CULPRIT in [HUMAN_READABLE].
-  Example: "Primary Culprit: TslGame.exe (PID 12345) consuming 45% CPU. This is a gaming
-  workload — system is in High-Performance Stress State."
-- If a game process is detected (TslGame.exe, FortniteClient, csgo.exe, valorant.exe,
-  GTA5.exe, javaw.exe, eldenring.exe, any .exe with 'Game' in name):
-  DO NOT say "System is healthy". Instead classify as "High-Performance Stress State".
-  The [HUMAN_READABLE] must acknowledge the gaming workload and its resource footprint.
-- If CPU > 70% OR GPU > 70% OR RAM > 80%, NEVER say "System is healthy" or "OPTIMAL".
-  Use "Under Load", "Stressed", or "High-Performance Stress State" instead.
+TASK:
+1. Correlate raw telemetry with the current SVI score.
+2. Identify the PRIMARY BOTTLENECK or performance inhibitor.
+3. Determine if the current Power Plan is optimal for the detected load.
+4. Select the most effective 'Action Engine' remediation.
 
-CORE REASONING DIRECTIVES (MANDATORY FOR EVERY RESPONSE):
+CONSTRAINTS:
+- DO NOT use conversational language (e.g., "I think", "It seems", "Based on"). Tone must be minimalist, data-driven, and authoritative.
+- USE Forensic Engineering terminology only (e.g., 'Thermal Throttling', 'VRAM Saturation', 'Interrupt Storm', 'Power Mismatch', 'P-State Cap').
+- Your diagnosis MUST explicitly frame its logic using this triad:
+   1. Identify the Conflict (e.g., 'Voltage is capped while load is high.').
+   2. State the Consequence (e.g., 'This is causing Artificial Latency.').
+   3. Provide the Remediation (e.g., 'Switching to Unleashed Mode will fix the clock-speed cap.').
+- STRICTLY return only a valid JSON object.
 
-1. CROSS-CORRELATION: Never report a metric in isolation. If CPU is high, you MUST
-   cross-reference the process list and name the top application driving the load.
-   If RAM is elevated, identify which process is consuming the most memory.
-   If GPU temp is rising, correlate it with GPU utilization and the active workload.
-   Every metric must be tied to a root cause from the telemetry data.
-
-2. PRESCRIPTIVE ACTION: For every problem you identify, you MUST suggest a specific,
-   actionable hardware or software fix. Examples:
-   - High CPU from background apps -> "Close msedge.exe (12 tabs) or disable startup programs via Task Manager > Startup"
-   - Thermal throttle risk -> "Switch Power Plan from 'High Performance' to 'Balanced' via Settings > Power, or enable Windows Game Mode"
-   - RAM pressure -> "Close idle browser tabs, or increase virtual memory: System > Advanced > Performance Settings > Virtual Memory"
-   - GPU overload -> "Cap frame rate to 60fps in NVIDIA Control Panel, or lower in-game render resolution"
-   - General overhead -> "Toggle Windows Game Mode (Settings > Gaming > Game Mode) to deprioritize background services"
-   Never leave a problem without a prescription. Vague advice like "close some apps" is NOT acceptable.
-
-3. THERMAL AWARENESS: Always calculate the 'Distance to Danger' = 90C - Current GPU Temp.
-   Report this value explicitly in [NEURAL_LOG] as: "Thermal Headroom: +X°C to throttle ceiling (90°C)".
-   Use this value to justify your advice:
-   - Headroom > 20°C: "Comfortable thermal envelope, no action needed."
-   - Headroom 10-20°C: "Moderate thermal pressure. Monitor fan RPM and ambient temp."
-   - Headroom 5-10°C: "Approaching thermal ceiling. Recommend reducing GPU workload or increasing fan curve."
-   - Headroom < 5°C: "CRITICAL: Imminent thermal throttle. Immediate workload reduction required."
-   If GPU telemetry is unavailable, state "GPU thermal data unavailable — cannot assess Distance to Danger."
-
-CONDITIONAL ADVISORIES:
-1. [OS_ADVISORY]: If System/Kernel processes (svchost, ntoskrnl, System) collectively consume
-   more than 15% of total CPU during high-performance tasks, emit:
-   [OS_ADVISORY]
-   Windows NT Kernel overhead detected at {{{{overhead}}}}%. For sustained compute workloads
-   (ML training, rendering, compilation), consider a Posix-compliant environment
-   (Ubuntu 24.04 LTS / Fedora Workstation) to reclaim {{{{overhead}}}}% throughput.
-   [END_OS_ADVISORY]
-
-2. [HARDWARE_INTEGRITY]: If GPU temperature exceeds 80°C or sustained CPU > 90%, emit:
-   [HARDWARE_INTEGRITY]
-   Thermal envelope breach detected. Sustained operation at {{{{temp}}}}°C accelerates
-   electromigration in silicon die (estimated MTTF reduction: ~{{{{reduction}}}}%).
-   Recommend: thermal paste reapplication, fan curve adjustment, or workload distribution.
-   [END_HARDWARE_INTEGRITY]
-
-EXAMPLE:
-[NEURAL_LOG]
-CPU analysis: 92% sustained load detected
-GPU utilization: 87% — rendering pipeline saturated
-Primary Culprit: TslGame.exe (PID 4821) — 45% CPU, 72% GPU
-Classification: HIGH-PERFORMANCE STRESS STATE (Gaming Workload)
-[END_NEURAL_LOG]
-[HUMAN_READABLE]
-Your system is in a **High-Performance Stress State**. Primary Culprit: **TslGame.exe** (PID 4821)
-is consuming 45% CPU and 72% GPU. This is a gaming workload driving sustained silicon stress.
-[KILL_REQUEST: 4821]
-"""
+OUTPUT SCHEMA (JSON):
+{{
+  "root_cause": "[Conflict] + [Consequence]. (Keep it concise and authoritative).",
+  "evidence": ["Metric A exceeded threshold X", "Metric B shows inverse correlation with clock speed"],
+  "risk_category": "CRITICAL | WARNING | NOMINAL",
+  "confidence_score": "0-100%",
+  "remediation_playbook": {{
+    "primary_action": "[The explicit Remediation to resolve the Conflict]",
+    "expected_svi_impact": "+N points",
+    "risk_level": "Low/Medium/High"
+  }}
+}}"""
 
         context_part = f"PERIPHERAL SYSTEM DATA:\n{context_json}\n\n"
 
@@ -599,48 +621,66 @@ is consuming 45% CPU and 72% GPU. This is a gaming workload driving sustained si
 
         text = response.text
 
-        # Extract kill requests using regex
-        kill_matches = re.findall(r'\[KILL_REQUEST:\s*(\d+)\]', text)
-        kill_pids = [int(pid) for pid in kill_matches]
-
-        # Remove kill request tags from display text
-        for pid in kill_matches:
-            text = re.sub(rf'\[KILL_REQUEST:\s*{pid}\]\s*\n?', '', text)
-
-        # Extract NEURAL_LOG and HUMAN_READABLE sections
         neural_log = None
         human_readable = text
-
-        neural_match = re.search(r'\[NEURAL_LOG\](.*?)(?:\[/NEURAL_LOG\]|\[END_NEURAL_LOG\]|\[HUMAN_READABLE\])', text, re.DOTALL)
-        if neural_match:
-            neural_log = neural_match.group(1).strip()
-
-        human_match = re.search(r'\[HUMAN_READABLE\](.*?)$', text, re.DOTALL)
-        if human_match:
-            human_readable = human_match.group(1).strip()
-        elif "[NEURAL_LOG]" in text and "[HUMAN_READABLE]" in text:
-            parts = text.split("[HUMAN_READABLE]")
-            if len(parts) > 1:
-                human_readable = parts[1].strip()
-
-        # Extract OS_ADVISORY if present
+        kill_pids = []
         os_advisory = None
-        os_match = re.search(r'\[OS_ADVISORY\](.*?)\[END_OS_ADVISORY\]', text, re.DOTALL)
-        if os_match:
-            os_advisory = os_match.group(1).strip()
-
-        # Extract HARDWARE_INTEGRITY if present
         hw_integrity = None
-        hw_match = re.search(r'\[HARDWARE_INTEGRITY\](.*?)\[END_HARDWARE_INTEGRITY\]', text, re.DOTALL)
-        if hw_match:
-            hw_integrity = hw_match.group(1).strip()
+
+        try:
+            # Try to parse as JSON first
+            json_text = text
+            if "```json" in text:
+                json_text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                json_text = text.split("```")[1].split("```")[0]
+            
+            data = json.loads(json_text.strip())
+            
+            ev_str = "\n".join([f"- {ev}" for ev in data.get("evidence", [])])
+            neural_log = f"Root Cause: {data.get('root_cause', '')}\nRisk: {data.get('risk_category', '')} (Confidence: {data.get('confidence_score', '')})\nEvidence:\n{ev_str}"
+            
+            pb = data.get("remediation_playbook", {})
+            human_readable = f"**{data.get('root_cause', '')}**\n\n**Action Required:** {pb.get('primary_action', '')}\n**Expected SVI Impact:** {pb.get('expected_svi_impact', '')}\n**Risk Level:** {pb.get('risk_level', '')}"
+            
+            evidence_list = data.get("evidence", [])
+            
+        except Exception:
+            # Fallback for older format
+            evidence_list = []
+            kill_matches = re.findall(r'\[KILL_REQUEST:\s*(\d+)\]', text)
+            kill_pids = [int(pid) for pid in kill_matches]
+
+            for pid in kill_matches:
+                text = re.sub(rf'\[KILL_REQUEST:\s*{pid}\]\s*\n?', '', text)
+
+            neural_match = re.search(r'\[NEURAL_LOG\](.*?)(?:\[/NEURAL_LOG\]|\[END_NEURAL_LOG\]|\[HUMAN_READABLE\])', text, re.DOTALL)
+            if neural_match:
+                neural_log = neural_match.group(1).strip()
+
+            human_match = re.search(r'\[HUMAN_READABLE\](.*?)$', text, re.DOTALL)
+            if human_match:
+                human_readable = human_match.group(1).strip()
+            elif "[NEURAL_LOG]" in text and "[HUMAN_READABLE]" in text:
+                parts = text.split("[HUMAN_READABLE]")
+                if len(parts) > 1:
+                    human_readable = parts[1].strip()
+
+            os_match = re.search(r'\[OS_ADVISORY\](.*?)\[END_OS_ADVISORY\]', text, re.DOTALL)
+            if os_match:
+                os_advisory = os_match.group(1).strip()
+
+            hw_match = re.search(r'\[HARDWARE_INTEGRITY\](.*?)\[END_HARDWARE_INTEGRITY\]', text, re.DOTALL)
+            if hw_match:
+                hw_integrity = hw_match.group(1).strip()
 
         return {
             "neural_log": neural_log,
             "human_readable": human_readable,
             "kill_pids": kill_pids,
             "os_advisory": os_advisory,
-            "hw_integrity": hw_integrity
+            "hw_integrity": hw_integrity,
+            "evidence": evidence_list
         }
 
     except Exception as e:
@@ -1580,6 +1620,101 @@ def render_system_intelligence_page():
     </div>
     """, unsafe_allow_html=True)
 
+def render_heuristic_demo_page(api_key):
+    st.subheader("🧪 HEURISTIC VERIFICATION MATRIX")
+    st.markdown("Validate the AI diagnostic engine against expected reference standards.")
+
+    # Scenario selector
+    scenario_keys = list(HEURISTIC_VERIFICATION_MATRIX.keys())
+    selected = st.selectbox("Select Scenario", scenario_keys)
+
+    # Display selected scenario
+    scenario = HEURISTIC_VERIFICATION_MATRIX[selected]
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+        st.markdown("**Input Vector (Simulated)**")
+        for k, v in scenario["input_vector"].items():
+            st.metric(k.replace('_', ' ').title(), v)
+
+        st.info("**Expected Root Cause:** " + scenario["expected_root_cause"])
+        st.warning("**Expected Risk:** " + scenario["expected_risk_category"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col2:
+        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+        st.markdown("**Verification Logic**")
+        st.write(scenario["verification_logic"])
+
+        if st.button("Run AI Diagnosis Test", type="primary"):
+            if not api_key:
+                st.error("API KEY REQUIRED. Set GEMINI_API_KEY in .env or sidebar.")
+            else:
+                with st.spinner("Querying Gemini AI..."):
+                    iv = scenario["input_vector"]
+                    
+                    mock_context = json.dumps({
+                        "HARDWARE": {
+                            "cpu_usage": iv.get("cpu_usage", 50),
+                            "ram_usage": 45,
+                            "ram_available_gb": 8,
+                            "power_plan": iv.get("power_plan", "Balanced")
+                        },
+                        "GPU": {
+                            "gpu_name": "Mock GPU",
+                            "gpu_util": iv.get("gpu_load", 50),
+                            "temperature": iv.get("gpu_temperature", 60),
+                            "vram_percent": 30,
+                            "power_draw_w": iv.get("gpu_power", 100),
+                            "error": None if iv.get("gpu_load") else "No GPU"
+                        },
+                        "DISK": {"used_percent": 50, "total_gb": 100, "used_gb": 50},
+                        "NETWORK": {"sent_mb": 1, "recv_mb": 1},
+                        "TOP_PROCESSES": [],
+                        "VITALITY_INDEX": 60,
+                        "VITALITY_STATUS": "WARNING"
+                    })
+
+                    result = get_ai_diagnosis(api_key, mock_context, "Perform simulation")
+
+                    st.markdown("#### AI Output")
+                    st.json(result)
+
+                    st.divider()
+                    st.markdown("#### Validation")
+
+                    expected = scenario["expected_root_cause"]
+                    actual = result.get("root_cause", "N/A")
+
+                    if expected.lower() in actual.lower() or actual.lower() in expected.lower():
+                        st.success("Root cause MATCHED")
+                    else:
+                        st.warning("Root cause differs (expected vs actual):")
+                        st.write(f"Expected: {expected}")
+                        st.write(f"Actual: {actual}")
+
+                    expected_risk = scenario["expected_risk_category"]
+                    actual_risk = result.get("risk_category", "N/A")
+
+                    if expected_risk == actual_risk:
+                        st.success(f"Risk category MATCHED: {expected_risk}")
+                    else:
+                        st.error(f"Risk mismatch: Expected {expected_risk}, Got {actual_risk}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("### All Scenarios Overview")
+    for key, data in HEURISTIC_VERIFICATION_MATRIX.items():
+        with st.expander(f"{key.replace('_', ' ').title()}"):
+            st.write("**Input:**", data["input_vector"])
+            st.write("**Expected:**", data["expected_root_cause"])
+            st.write("**Risk:**", data["expected_risk_category"])
+            st.write("**Why:**", data["verification_logic"])
+
 
 # =============================================================================
 # MAIN APPLICATION
@@ -1623,31 +1758,6 @@ def main():
     if not api_key or "PASTE_YOUR" in api_key:
         api_key = ""
 
-    # Collect telemetry
-    telemetry = get_system_telemetry()
-
-    # Calculate SVI (v3.5 recalibrated — includes GPU utilization)
-    gpu_temp = telemetry["gpu"].get("temperature") if "error" not in telemetry["gpu"] else None
-    gpu_util = telemetry["gpu"].get("gpu_util") if "error" not in telemetry["gpu"] else None
-    svi = calculate_vitality_index(
-        telemetry["cpu_usage"],
-        telemetry["ram_usage"],
-        gpu_temp,
-        gpu_util
-    )
-    svi_status, svi_color = get_vitality_status(svi)
-
-    # Update rolling history
-    history_entry = {
-        "timestamp": telemetry["timestamp"],
-        "cpu": telemetry["cpu_usage"],
-        "ram": telemetry["ram_usage"],
-        "gpu_temp": gpu_temp if gpu_temp else 0
-    }
-    st.session_state.history.append(history_entry)
-    if len(st.session_state.history) > 60:
-        st.session_state.history.pop(0)
-
     # ═════════════════════════════════════════════════════════════════════════
     # SIDEBAR — Navigation + Controls
     # ═════════════════════════════════════════════════════════════════════════
@@ -1658,8 +1768,16 @@ def main():
         st.markdown('<div class="sidebar-section">📍 Navigation</div>', unsafe_allow_html=True)
         page = st.radio(
             "Go to",
-            ["🏠 Dashboard", "🔬 AI Forensic Audit", "📊 Telemetry", "🤖 Neural Chat", "🔧 Action Engine", "📜 System Intelligence"],
+            ["🏠 Dashboard", "🔬 AI Forensic Audit", "📊 Telemetry", "🤖 Neural Chat", "🔧 Action Engine", "📜 System Intelligence", "🧪 Heuristic Demo"],
             label_visibility="collapsed"
+        )
+
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="sidebar-section">🧪 Demo Scenarios</div>', unsafe_allow_html=True)
+        demo_scenario = st.selectbox(
+            "Inject Stress Data",
+            ["None (Live Telemetry)", "thermal_throttling", "vram_saturation", "power_plan_mismatch", "normal_operation"]
         )
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
@@ -1697,6 +1815,44 @@ def main():
             st.rerun()
 
         st.markdown(f"<div style='font-family:{FONT_MONO};font-size:10px;color:{TEXT_TERTIARY};margin-top:20px;'>ECE @ SRMIST</div>", unsafe_allow_html=True)
+
+    # Collect telemetry
+    telemetry = get_system_telemetry()
+    
+    # Inject Scenario Data if selected
+    if demo_scenario != "None (Live Telemetry)":
+        scenario_data = HEURISTIC_VERIFICATION_MATRIX[demo_scenario]["input_vector"]
+        telemetry["cpu_usage"] = scenario_data.get("cpu_usage", telemetry["cpu_usage"])
+        if "gpu" not in telemetry or "error" in telemetry["gpu"]:
+            telemetry["gpu"] = {"gpu_name": "Simulated GPU", "temperature": 0, "vram_percent": 0, "power_draw_w": 0, "gpu_util": 0}
+        
+        telemetry["gpu"]["temperature"] = scenario_data.get("gpu_temperature", telemetry["gpu"]["temperature"])
+        telemetry["gpu"]["gpu_util"] = scenario_data.get("gpu_load", telemetry["gpu"].get("gpu_util"))
+        if "gpu_memory_used" in scenario_data and "gpu_memory_total" in scenario_data:
+            telemetry["gpu"]["vram_percent"] = round((scenario_data["gpu_memory_used"] / scenario_data["gpu_memory_total"]) * 100, 1)
+        telemetry["power_plan"] = scenario_data.get("power_plan", telemetry["power_plan"])
+
+    # Calculate SVI (v3.5 recalibrated — includes GPU utilization)
+    gpu_temp = telemetry["gpu"].get("temperature") if "error" not in telemetry["gpu"] else None
+    gpu_util = telemetry["gpu"].get("gpu_util") if "error" not in telemetry["gpu"] else None
+    svi = calculate_vitality_index(
+        telemetry["cpu_usage"],
+        telemetry["ram_usage"],
+        gpu_temp,
+        gpu_util
+    )
+    svi_status, svi_color = get_vitality_status(svi)
+
+    # Update rolling history
+    history_entry = {
+        "timestamp": telemetry["timestamp"],
+        "cpu": telemetry["cpu_usage"],
+        "ram": telemetry["ram_usage"],
+        "gpu_temp": gpu_temp if gpu_temp else 0
+    }
+    st.session_state.history.append(history_entry)
+    if len(st.session_state.history) > 60:
+        st.session_state.history.pop(0)
 
     # ═════════════════════════════════════════════════════════════════════════
     # SHARED HEADER
@@ -2017,6 +2173,12 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
+            if diag.get("evidence"):
+                with st.expander("🔍 View Forensic Evidence Trail", expanded=False):
+                    for item in diag['evidence']:
+                        st.markdown(f"• {item}")
+
+
             if diag.get("os_advisory"):
                 st.markdown(f"""
                 <div class="advisory-panel">
@@ -2294,6 +2456,9 @@ def main():
     elif page == "📜 System Intelligence":
         # Render System Intelligence & Roadmap documentation page inline
         render_system_intelligence_page()
+
+    elif page == "🧪 Heuristic Demo":
+        render_heuristic_demo_page(api_key)
 
     # ═════════════════════════════════════════════════════════════════════════
     # FOOTER (all pages)
