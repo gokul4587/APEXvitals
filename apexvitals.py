@@ -18,6 +18,13 @@ from datetime import datetime
 from google import genai
 from dotenv import load_dotenv
 from fpdf import FPDF
+from analytics import (
+    generate_svi_radar_chart,
+    generate_trend_chart,
+    generate_svi_forecast_chart,
+    save_chart_to_tempfile,
+    save_radar_chart_to_tempfile,
+)
 
 try:
     import py3nvml.py3nvml as nvml
@@ -239,8 +246,8 @@ def sanitize_text_for_pdf(text):
     # Fallback: remove any other characters that are not in Latin-1
     return text.encode('latin-1', 'replace').decode('latin-1')
 
-def generate_pdf_report(report_data):
-    """Generates a professional PDF diagnostic report."""
+def generate_pdf_report(report_data, radar_chart_path=None, trend_chart_path=None, forecast_chart_path=None):
+    """Generates a professional PDF diagnostic report with optional chart embeds."""
     pdf = FPDF()
     pdf.add_page()
 
@@ -273,8 +280,40 @@ def generate_pdf_report(report_data):
     pdf.cell(0, 8, f"Score: {svi}/100 ({svi_status})", ln=True)
     pdf.ln(5)
 
+    # ── Radar Chart Embed ──
+    if radar_chart_path and os.path.exists(radar_chart_path):
+        pdf.set_font('Arial', 'B', 12)
+        pdf.set_text_color(99, 102, 241)
+        pdf.cell(0, 10, 'Vitality Breakdown (Radar Analysis)', ln=True, align='C')
+        pdf.ln(2)
+        # Center the image: page width = 210mm, margins = 30mm, image = 120mm
+        x_pos = (210 - 120) / 2
+        pdf.image(radar_chart_path, x=x_pos, w=120)
+        pdf.ln(8)
+
+    # ── SVI Forecast Chart Embed ──
+    if forecast_chart_path and os.path.exists(forecast_chart_path):
+        pdf.set_font('Arial', 'B', 12)
+        pdf.set_text_color(99, 102, 241)
+        pdf.cell(0, 10, 'SVI Forecast (Current vs 5-Minute Prediction)', ln=True, align='C')
+        pdf.ln(2)
+        x_pos = (210 - 100) / 2
+        pdf.image(forecast_chart_path, x=x_pos, w=100)
+        pdf.ln(8)
+
+    # ── Trend Chart Embed ──
+    if trend_chart_path and os.path.exists(trend_chart_path):
+        pdf.add_page()  # New page for the wide trend chart
+        pdf.set_font('Arial', 'B', 12)
+        pdf.set_text_color(99, 102, 241)
+        pdf.cell(0, 10, 'Telemetry Trend (Session History)', ln=True, align='C')
+        pdf.ln(2)
+        pdf.image(trend_chart_path, x=15, w=180)  # Full width
+        pdf.ln(8)
+
     # Power Plan
     pdf.set_font('Arial', 'B', 12)
+    pdf.set_text_color(50, 50, 50)
     pdf.cell(40, 8, 'Power Plan:', ln=0)
     pdf.set_font('Arial', '', 12)
     power_plan = sanitize_text_for_pdf(report_data.get('power_plan', 'Unknown'))
@@ -528,33 +567,74 @@ def get_ai_diagnosis(api_key, context_json, user_query, chat_history=None):
         anomaly_log = "None"
 
         system_instruction = f"""SYSTEM ROLE:
-You are the APEXVITALS v2.0 Forensic Reasoning Engine, an AIOps diagnostic tool developed at SRMIST ECE. Your purpose is to bridge the "Telemetry-Reasoning Gap" by performing deep-trace analysis on hardware signals.
+You are the APEXVITALS v3.5 Forensic Reasoning Engine (POD-C Brain), an AIOps diagnostic tool developed at SRMIST ECE.
+You bridge the "Telemetry-Reasoning Gap" by performing deep-trace analysis on hardware signals.
 
 INPUT DATA:
-- CPU Utilization: {cpu_usage}% | Temp: {cpu_temp}°C
-- GPU Utilization: {gpu_usage}% | VRAM: {vram_usage}MB | Power: {gpu_wattage}W
+- CPU Utilization: {cpu_usage}% | Temp: {cpu_temp}
+- GPU Utilization: {gpu_usage}% | VRAM: {vram_usage}% | Power: {gpu_wattage}W
 - System Vitality Index (SVI): {svi_score}/100
 - Active Windows Power Plan: {power_plan}
 - Recent Anomalies: {anomaly_log}
 
-TASK:
-1. Correlate raw telemetry with the current SVI score.
-2. Identify the PRIMARY BOTTLENECK or performance inhibitor.
-3. Determine if the current Power Plan is optimal for the detected load.
-4. Select the most effective 'Action Engine' remediation.
+You MUST produce exactly TWO layers in your output, in this order:
+
+===== LAYER 1 — HUMAN SUMMARY =====
+Start this section with the Markdown heading: ## Human Summary
+
+Audience: a normal Windows user who can watch a tech reel but is NOT a hardware engineer.
+Style: short, direct bullet points, like a clear technical Instagram explanation.
+Avoid deep jargon (VRM, Prochot_L, TJMax, P-state, scheduler quantum, etc.).
+Use terms like "overloaded", "running hot", "background apps", "power mode" instead.
+
+For every incident, answer THESE FIVE QUESTIONS as bullet points, in order:
+1. What the user is probably feeling or seeing (e.g., "Your laptop feels slow and the fans are loud.")
+2. What is actually happening in simple language (e.g., "Both the CPU and GPU are running near their limits while Windows is still in a conservative power mode.")
+3. Where the main pressure is coming from (e.g., "Most of the stress is from compute load and heat, not from memory or disk.")
+4. What they should do right now (e.g., "Switch to High Performance mode and close heavy background tasks.")
+5. What might happen if they ignore it (e.g., "If you leave it like this, the system may keep throttling and feel choppy or unstable.")
+
+Keep Layer 1 to 5-10 bullet points. No process IDs, no register names.
+
+===== LAYER 2 — FORENSIC DETAILS =====
+Start this section with the Markdown heading: ## Forensic Details
+
+Audience: power users, viva examiners, and recruiters.
+Use deep technical language and structured forensic reasoning.
+
+Organize into these clearly labeled Markdown sub-headings:
+
+### Root Cause
+A precise technical description of the main bottleneck(s).
+
+### Evidence
+Specific metrics (CPU%, GPU%, VRAM%, temps, power plan, SVI) and how they support your root cause.
+
+### Remediation (Logic Triad)
+1. **Conflict**: Identify the conflict.
+2. **Consequence**: State the consequence.
+3. **Remediation**: Provide the remediation.
+
+### Action Engine Deployment
+Recommended actions (e.g., switch power plan, terminate a process, increase cooling).
+If a process should be killed, use exactly this format: [KILL_REQUEST: PID]
+
+### 5-Minute Forecast
+Predicted SVI trend: STABLE, DEGRADE, or IMPROVE.
+Include a predicted numeric SVI value (e.g., "SVI is projected to drop from 60 to 48").
+Include a short explanation.
+
+### Visualization Plan
+Describe charts the host app should render (do NOT output any code):
+1. **SVI Radar Chart** — which of the 4 axes (Compute Load, Memory Pressure, Thermal Stress, Power Plan Efficiency) are high risk and why.
+2. **Time Series Trend** — what patterns to highlight in the CPU/RAM/GPU history.
+3. **SVI Now vs Forecast** — current SVI number vs predicted SVI number and whether the trend is STABLE, DEGRADE, or IMPROVE.
 
 CONSTRAINTS:
-- Act as a Senior Hardware Systems Engineer.
-- DO NOT use conversational language. Tone must be authoritative.
-- USE Forensic Engineering terminology (e.g., 'Thermal Throttling', 'VRAM Saturation', 'Interrupt Storm').
-- Your diagnosis MUST explicitly frame its logic using this triad:
-   1. Identify the Conflict (e.g., 'Voltage is capped while load is high.').
-   2. State the Consequence (e.g., 'This is causing Artificial Latency.').
-   3. Provide the Remediation (e.g., 'Switching to Unleashed Mode will fix the clock-speed cap.').
-- 5-Minute Forecast: Add a section titled '**5-Minute Forecast**' to predict if the SVI will improve or degrade based on current telemetry.
-- Ensure the output is clean Markdown text, not a JSON code block.
-- Bold the key headers like **Root Cause**, **Evidence**, **Remediation**, and **5-Minute Forecast**.
-- If necessary, issue a kill request using exactly this format: [KILL_REQUEST: PID]
+- Output clean Markdown text only, not JSON code blocks.
+- Every metric must have a root cause (cross-correlate with process list).
+- For every problem, suggest a specific actionable fix.
+- Calculate Distance to Danger = 90C - GPU Temp. Report explicitly.
 """
 
         context_part = f"PERIPHERAL SYSTEM DATA:\n{context_json}\n\n"
@@ -607,15 +687,26 @@ CONSTRAINTS:
         return {"error": err_msg}
 
 def get_chat_response_streaming(api_key, context_json, user_input, chat_history):
-    """Chatbot mode with streaming response for real-time typewriter effect."""
+    """Chatbot mode with streaming response for real-time typewriter effect.
+    
+    Yields text chunks directly (generator function) to keep the genai.Client
+    alive for the entire stream lifecycle. Returning the raw stream object
+    would allow the client to be garbage-collected before consumption.
+    """
     try:
         client = genai.Client(api_key=api_key.strip())
 
-        system_prompt = """You are APEX, an AI diagnostic assistant embedded in the APEXVITALS v3.5 system monitoring tool.
+        system_prompt = """You are APEX, the AI diagnostic assistant embedded in the APEXVITALS v3.5 system monitoring tool (POD-C Brain).
 You have access to real-time hardware telemetry. Answer questions about system health, performance bottlenecks, and optimization.
-Be technical but concise. Never use analogies. Reference actual metric values.
-If the user asks about battery, thermal margins, or network I/O, reference the Impact HUD metrics.
-If system/kernel overhead is high (>15%), you may recommend a Linux transition.
+
+RESPONSE STYLE:
+- For quick questions: be technical but concise. Use bullet points.
+- For diagnostic questions: use the two-layer format:
+  1. **Human Summary** — simple bullet points a normal user can understand (no deep jargon).
+  2. **Forensic Details** — technical breakdown with Root Cause, Evidence, Remediation Triad, and 5-Minute Forecast.
+- Never use analogies. Reference actual metric values from the system context.
+- If the user asks about battery, thermal margins, or network I/O, reference the Impact HUD metrics.
+- If system/kernel overhead is high (>15%), you may recommend a Linux transition.
 
 CORE REASONING DIRECTIVES (ALWAYS FOLLOW):
 1. CROSS-CORRELATION: Never report a metric in isolation. If CPU is high, name the top
@@ -626,6 +717,8 @@ CORE REASONING DIRECTIVES (ALWAYS FOLLOW):
 3. THERMAL AWARENESS: Calculate Distance to Danger = 90C - GPU Temp. Report it explicitly.
    Headroom >20C = safe, 10-20C = monitor, 5-10C = reduce workload, <5C = CRITICAL.
    If GPU data unavailable, state so.
+4. FORECAST: When performing diagnostics, predict whether SVI will STABLE, DEGRADE, or IMPROVE
+   in the next 5 minutes based on current trends and load patterns.
 """
 
         # Build conversation context
@@ -636,15 +729,19 @@ CORE REASONING DIRECTIVES (ALWAYS FOLLOW):
 
         full_prompt = f"{system_prompt}\n\n[SYSTEM CONTEXT]\n{context_json}\n\n[CONVERSATION HISTORY]\n{conversation}\n\nUser: {user_input}\nAssistant:"
 
-        # Use streaming for typewriter effect
+        # Use streaming for typewriter effect — yield chunks directly
+        # so the client stays alive for the entire iteration
         response_stream = client.models.generate_content_stream(
             model="gemini-3-flash-preview",
             contents=full_prompt
         )
 
-        return response_stream
+        for chunk in response_stream:
+            if chunk.text:
+                yield chunk.text
+
     except Exception as e:
-        return f"Error: {str(e)}"
+        yield f"Error: {str(e)}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI CONFIGURATION
@@ -1285,11 +1382,11 @@ def render_system_intelligence_page():
     <div style='display: flex; align-items: center; gap: 12px; margin-bottom: 8px;'>
         <div style='width: 4px; height: 28px; background: linear-gradient(180deg, {ACCENT_PRIMARY} 0%, {ACCENT_SECONDARY} 100%); border-radius: 2px;'></div>
         <div style='font-family:{FONT_UI};font-size:28px;font-weight:700;color:{TEXT_PRIMARY};'>
-            System Intelligence & Roadmap
+            How ApexVitals Works
         </div>
     </div>
     <div style='font-family:{FONT_MONO};font-size:11px;color:{TEXT_TERTIARY};margin-bottom:24px;'>
-        APEXVITALS v3.5 — Engineering Architecture Reference
+        APEXVITALS v3.5 — A Plain-English Guide to the System
     </div>
     <div style='height: 1px; background: linear-gradient(90deg, {ACCENT_PRIMARY} 0%, transparent 100%); margin-bottom: 32px;'></div>
     """, unsafe_allow_html=True)
@@ -1297,15 +1394,15 @@ def render_system_intelligence_page():
     # Section 1: POD Framework
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:20px;font-weight:600;color:{ACCENT_PRIMARY};margin:32px 0 16px 0;'>
-        1. Structural Architecture: The POD Framework
+        1. The Three-Part Design (POD Architecture)
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:14px;color:{TEXT_SECONDARY};line-height:1.7;margin-bottom:20px;'>
-        ApexVitals implements a <strong>Decoupled Modular Design</strong> pattern termed the <strong>POD Architecture</strong>.
-        This three-layer separation ensures that data acquisition is isolated from high-level reasoning,
-        enabling maintainability, testability, and clear separation of concerns.
+        ApexVitals is split into <strong>three independent modules</strong> called <strong>PODs</strong> (Points of Deployment).
+        Think of it like a hospital: one team collects blood samples (data), another team reads the reports (diagnosis),
+        and a third team gives the treatment (action). Keeping them separate makes the system easier to test, fix, and upgrade.
     </div>
     """, unsafe_allow_html=True)
 
@@ -1327,60 +1424,63 @@ def render_system_intelligence_page():
         """, unsafe_allow_html=True)
 
     render_pod_card(
-        "POD-A — Data Acquisition Layer (Scanner)",
+        "POD-A — The Scanner (Collects Data)",
         ACCENT_PRIMARY,
-        "Interfaces directly with <strong>Windows APIs</strong> and the <strong>NVIDIA Management Library (NVML)</strong> "
-        "to capture high-resolution hardware telemetry. This layer abstracts raw sensor access, "
-        "normalizing metrics across different hardware generations and providing a consistent "
-        "data schema to downstream components.",
-        "Metrics: CPU utilization, RAM pressure, GPU temperature/VRAM/power, disk I/O, network throughput, Windows power plan"
+        "This module reads your hardware sensors in real time. "
+        "It talks directly to <strong>Windows</strong> and the <strong>NVIDIA GPU driver (NVML)</strong> "
+        "to grab numbers like CPU usage, RAM usage, GPU temperature, and power draw. "
+        "It cleans up the raw data so the rest of the system gets consistent, reliable numbers "
+        "no matter what hardware you have.",
+        "What it reads: CPU %, RAM %, GPU temp / VRAM / wattage, disk usage, network speed, Windows power plan"
     )
 
     render_pod_card(
-        "POD-C — Heuristic Inference Layer (Brain)",
+        "POD-C — The Brain (Thinks & Diagnoses)",
         ACCENT_SECONDARY,
-        "Utilizes <strong>Google Gemini 2.0 Flash</strong> as a probabilistic logic engine. "
-        "Rather than relying on static threshold-based rules, the AI performs <strong>Pattern Correlation</strong> "
-        "to understand interdependencies between hardware metrics—recognizing how voltage fluctuations, "
-        "clock speed throttling, and thermal accumulation interact during sustained workloads.",
-        "Output: Structured diagnostic JSON + human-readable narrative"
+        "This is where the AI lives. It uses <strong>Google Gemini 3 Flash</strong> to look at all the sensor data "
+        "at once and figure out <em>why</em> your system is slow or hot. "
+        "Instead of simple 'if CPU > 90% then warn' rules, it connects the dots — for example, "
+        "noticing that your GPU is throttling its speed <em>because</em> it's overheating, "
+        "not just because the load is high.",
+        "Output: A two-layer report — simple summary for you + detailed forensic breakdown for experts"
     )
 
     render_pod_card(
-        "POD-D — Execution Layer (Action)",
+        "POD-D — The Action Engine (Fixes Things)",
         ACCENT_SUCCESS,
-        "Translates AI-driven insights into safe, user-authorized system commands. "
-        "The <strong>Bouncer</strong> guardrail enforces process termination safety by "
-        "maintaining an immutable denylist of protected system processes (explorer.exe, "
-        "svchost.exe, lsass.exe) and rejecting any operation targeting SYSTEM-owned PIDs.",
-        "Operations: PID termination, power plan switching, remediation suggestions"
+        "Once the Brain decides what's wrong, this module can take action — like closing a heavy app "
+        "or switching your power plan. But it has a built-in safety guard called <strong>The Bouncer</strong>. "
+        "The Bouncer keeps a list of processes that must never be touched (like explorer.exe, svchost.exe) "
+        "and blocks any attempt to close them, even if the AI asks.",
+        "What it can do: close resource-heavy apps, switch power plans, suggest fixes"
     )
 
     # Section 2: AI Diagnostics
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:20px;font-weight:600;color:{ACCENT_PRIMARY};margin:32px 0 16px 0;'>
-        2. The Role of Generative AI in Diagnostics
+        2. What Makes the AI Special?
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:14px;color:{TEXT_SECONDARY};line-height:1.7;margin-bottom:16px;'>
-        Conventional system monitoring tools provide raw telemetry without contextual interpretation.
-        ApexVitals employs <strong>Generative AI</strong> to perform <strong>Forensic Matching</strong>—correlating
-        process-level resource consumption with temporal telemetry spikes to identify causal relationships.
+        Most system monitors just show you numbers — "CPU is at 90%" — and leave you to figure out <em>why</em>.
+        ApexVitals uses <strong>Generative AI</strong> to do the detective work for you.
+        It looks at which apps are running, how much each one is using, and when the spikes happened,
+        then tells you exactly what's causing the problem.
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style='background:linear-gradient(135deg, {BG_CARD} 0%, {BG_DEEP} 100%);border-left:4px solid {ACCENT_INFO};border-radius:8px;padding:16px;margin:16px 0;'>
         <div style='font-family:{FONT_UI};font-size:15px;font-weight:600;color:{TEXT_PRIMARY};margin-bottom:8px;'>
-            🔍 Resource Bully Identification
+            🔍 Finding the "Resource Bully"
         </div>
         <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.6;'>
-            The system identifies a <strong>Resource Bully</strong>—an application causing disproportionate
-            system load—by analyzing the process list alongside CPU, RAM, and GPU utilization patterns.
-            The AI generates a human-readable explanation articulating <em>why</em> that specific process
-            is impacting performance, including memory access patterns, thread behavior, and thermal correlation.
+            A <strong>Resource Bully</strong> is an app that hogs way more CPU, RAM, or GPU than it should.
+            The AI scans all running processes, compares them against the hardware usage spikes,
+            and tells you in plain English: "<em>Chrome is eating 4 GB of RAM across 47 tabs,
+            which is why your system feels sluggish.</em>"
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1388,15 +1488,15 @@ def render_system_intelligence_page():
     # Section 3: SVI
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:20px;font-weight:600;color:{ACCENT_PRIMARY};margin:32px 0 16px 0;'>
-        3. The Quantitative Metric: System Vitality Index (SVI)
+        3. The Health Score: System Vitality Index (SVI)
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:14px;color:{TEXT_SECONDARY};line-height:1.7;margin-bottom:16px;'>
-        The SVI provides a singular, normalized metric representing the current <strong>entropy</strong>
-        or stress level of the system. It consolidates multiple hardware dimensions into one
-        interpretable score for real-time health assessment.
+        Instead of making you read five different numbers, ApexVitals combines them into
+        <strong>one single score from 0 to 100</strong>. A score of 100 means everything is running perfectly.
+        As hardware gets stressed, the score drops. Think of it like a fitness score for your computer.
     </div>
     """, unsafe_allow_html=True)
 
@@ -1405,27 +1505,28 @@ def render_system_intelligence_page():
     st.markdown(f"""
     <div style='background:{BG_CARD};border:1px solid {BORDER_ACCENT};border-radius:10px;padding:18px;margin:16px 0;'>
         <div style='font-family:{FONT_UI};font-size:15px;font-weight:600;color:{ACCENT_PRIMARY};margin-bottom:12px;'>
-            📐 Weighted Penalty Algorithm
+            📐 How the Score Drops (Penalty System)
         </div>
         <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.7;'>
-            Each resource is assigned a weight (ω) proportional to its impact on hardware longevity:
+            When a resource crosses a danger threshold, the score loses points. Resources that are more
+            dangerous to your hardware get a bigger penalty weight (ω):
         </div>
         <div style='margin-top: 12px;'>
             <div style='padding:8px 12px;margin:6px 0;background:{BG_DEEP};border-radius:6px;'>
                 <span style='font-family:{FONT_MONO};font-size:11px;color:{ACCENT_PRIMARY};'>ω = 1.5</span>
-                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'>CPU Penalty — Applied when utilization exceeds 85%</span>
+                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'><strong>CPU</strong> — Penalty kicks in when usage goes above 85%</span>
             </div>
             <div style='padding:8px 12px;margin:6px 0;background:{BG_DEEP};border-radius:6px;'>
                 <span style='font-family:{FONT_MONO};font-size:11px;color:{ACCENT_DANGER};'>ω = 2.5</span>
-                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'>RAM Penalty — Memory pressure above 90%</span>
+                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'><strong>RAM</strong> — Heaviest penalty. Memory above 90% can crash apps</span>
             </div>
             <div style='padding:8px 12px;margin:6px 0;background:{BG_DEEP};border-radius:6px;'>
                 <span style='font-family:{FONT_MONO};font-size:11px;color:{ACCENT_WARNING};'>ω = 1.2</span>
-                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'>Thermal Penalty — GPU temperature above 82°C</span>
+                <span style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY}; margin-left: 10px;'><strong>GPU Temperature</strong> — Penalty when temp crosses 82°C (risk of throttling)</span>
             </div>
         </div>
         <div style='font-family:{FONT_MONO};font-size:10px;color:{TEXT_TERTIARY};margin-top:14px; padding-top:10px; border-top: 1px solid {BORDER_MEDIUM};'>
-            Range: 0.0 (Critical) to 100.0 (Optimal) | OPTIMAL ≥80, NOMINAL 55-79, STRESSED 30-54, CRITICAL <30
+            Score guide: OPTIMAL ≥80 | NOMINAL 55-79 | STRESSED 30-54 | CRITICAL below 30
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1433,7 +1534,7 @@ def render_system_intelligence_page():
     # Section 4: Industrial Applications
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:20px;font-weight:600;color:{ACCENT_PRIMARY};margin:32px 0 16px 0;'>
-        4. Industrial Applications & Domain Integration
+        4. Where Can This Be Used?
     </div>
     """, unsafe_allow_html=True)
 
@@ -1443,16 +1544,17 @@ def render_system_intelligence_page():
         st.markdown(f"""
         <div style='background:{BG_CARD};border:1px solid {BORDER_MEDIUM};border-radius:10px;padding:16px;height:100%; border-top: 3px solid {ACCENT_WARNING};'>
             <div style='font-family:{FONT_UI};font-size:16px;font-weight:600;color:{ACCENT_WARNING};margin-bottom:10px;'>
-                🔬 VLSI & Thermal Management
+                🔬 Chip Design & Heat Management
             </div>
             <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.6;'>
-                Prototype for monitoring <strong>Thermal Envelopes</strong> in high-performance computing.
-                Proactive intervention against:
+                High-performance chips generate a lot of heat. If not managed, this heat causes
+                long-term damage. ApexVitals can track <strong>temperature patterns</strong> to warn
+                before damage happens:
             </div>
             <ul style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};line-height:1.5;margin:10px 0 0 18px;'>
-                <li>Silicon Degradation</li>
-                <li>Electromigration in interconnects</li>
-                <li>Thermal cycling fatigue</li>
+                <li>Chip wear-out from constant high heat</li>
+                <li>Tiny cracks in metal wiring inside the chip (electromigration)</li>
+                <li>Repeated hot-cold cycles weakening solder joints</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -1461,16 +1563,16 @@ def render_system_intelligence_page():
         st.markdown(f"""
         <div style='background:{BG_CARD};border:1px solid {BORDER_MEDIUM};border-radius:10px;padding:16px;height:100%; border-top: 3px solid {ACCENT_DANGER};'>
             <div style='font-family:{FONT_UI};font-size:16px;font-weight:600;color:{ACCENT_DANGER};margin-bottom:10px;'>
-                🛡️ Cybersecurity & Anomaly Detection
+                🛡️ Security & Suspicious Activity
             </div>
             <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.6;'>
-                Telemetry correlation for <strong>Anomaly Detection</strong>.
-                Unexplained power/CPU spikes flagged as:
+                If your CPU or power usage spikes for no obvious reason, something shady might
+                be happening. ApexVitals can flag these <strong>unusual patterns</strong> as:
             </div>
             <ul style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};line-height:1.5;margin:10px 0 0 18px;'>
-                <li>Potential malware activity</li>
-                <li>Unauthorized cryptomining</li>
-                <li>Covert data exfiltration tasks</li>
+                <li>Possible malware running in the background</li>
+                <li>Hidden cryptocurrency miners using your GPU</li>
+                <li>Unknown apps secretly sending data over the network</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -1478,30 +1580,31 @@ def render_system_intelligence_page():
     # Section 5: Future Scope
     st.markdown(f"""
     <div style='font-family:{FONT_UI};font-size:20px;font-weight:600;color:{ACCENT_PRIMARY};margin:32px 0 16px 0;'>
-        5. Future Scope: Transition to Agentic Governance
+        5. What’s Next? Making It Fully Automatic
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style='background:linear-gradient(135deg, {BG_CARD} 0%, {BG_DEEP} 100%);border:1px solid {BORDER_ACCENT};border-radius:10px;padding:18px;margin:12px 0; border-left: 4px solid {ACCENT_SUCCESS};'>
         <div style='font-family:{FONT_UI};font-size:16px;font-weight:600;color:{ACCENT_SUCCESS};margin-bottom:10px;'>
-            🤖 Autonomous Remediation
+            🤖 Self-Healing System (No Human Needed)
         </div>
         <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.6;'>
-            Transition from <strong>Human-in-the-Loop</strong> to <strong>Fully Agentic System</strong>:
+            Right now, the AI suggests fixes and <strong>you</strong> click the button to approve. In the future,
+            ApexVitals will be able to fix problems on its own — safely and instantly:
         </div>
         <div style='display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px;'>
             <div style='background:{BG_DEEP};padding:10px 12px;border-radius:6px; border:1px solid {BORDER_MEDIUM};'>
-                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Dynamic process priority adjustment</span>
+                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Automatically lower the priority of greedy apps</span>
             </div>
             <div style='background:{BG_DEEP};padding:10px 12px;border-radius:6px; border:1px solid {BORDER_MEDIUM};'>
-                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Proactive thermal throttling prevention</span>
+                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Detect rising heat and cool things down before throttling starts</span>
             </div>
             <div style='background:{BG_DEEP};padding:10px 12px;border-radius:6px; border:1px solid {BORDER_MEDIUM};'>
-                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Memory compaction and working set trimming</span>
+                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Free up RAM by shrinking memory-hungry background apps</span>
             </div>
             <div style='background:{BG_DEEP};padding:10px 12px;border-radius:6px; border:1px solid {BORDER_MEDIUM};'>
-                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Power plan switching based on workload classification</span>
+                <span style='font-family:{FONT_UI};font-size:12px;color:{TEXT_SECONDARY};'>Switch power plans automatically based on what you’re doing (gaming vs browsing)</span>
             </div>
         </div>
     </div>
@@ -1510,19 +1613,20 @@ def render_system_intelligence_page():
     st.markdown(f"""
     <div style='background:linear-gradient(135deg, {BG_CARD} 0%, {BG_DEEP} 100%);border:1px solid {BORDER_ACCENT};border-radius:10px;padding:18px;margin:12px 0; border-left: 4px solid {ACCENT_INFO};'>
         <div style='font-family:{FONT_UI};font-size:16px;font-weight:600;color:{ACCENT_INFO};margin-bottom:10px;'>
-            🔷 Edge Intelligence
+            🔷 Running on Dedicated Hardware (Edge AI)
         </div>
         <div style='font-family:{FONT_UI};font-size:13px;color:{TEXT_SECONDARY};line-height:1.6;'>
-            Porting the <strong>Scanner (POD-A)</strong> and localized LLM to dedicated hardware:
+            Instead of running on your main PC, the monitoring could run on its own small device —
+            like an always-on health tracker for machines:
         </div>
         <div style='display:flex;gap:12px;margin-top:12px;'>
             <div style='flex:1;background:{BG_DEEP};border:1px solid {BORDER_MEDIUM};border-radius:8px;padding:14px;'>
-                <div style='font-family:{FONT_MONO};font-size:11px;font-weight:600;color:{ACCENT_INFO};margin-bottom:8px;'>FPGA Implementation</div>
-                <div style='font-family:{FONT_UI};font-size:12px;color:{TEXT_TERTIARY};line-height:1.5;'>Hardware-level telemetry with deterministic latency for industrial control systems.</div>
+                <div style='font-family:{FONT_MONO};font-size:11px;font-weight:600;color:{ACCENT_INFO};margin-bottom:8px;'>FPGA Boards</div>
+                <div style='font-family:{FONT_UI};font-size:12px;color:{TEXT_TERTIARY};line-height:1.5;'>Custom hardware chips that read sensors with zero delay — useful for factories and power plants.</div>
             </div>
             <div style='flex:1;background:{BG_DEEP};border:1px solid {BORDER_MEDIUM};border-radius:8px;padding:14px;'>
                 <div style='font-family:{FONT_MONO};font-size:11px;font-weight:600;color:{ACCENT_SUCCESS};margin-bottom:8px;'>NVIDIA Jetson</div>
-                <div style='font-family:{FONT_UI};font-size:12px;color:{TEXT_TERTIARY};line-height:1.5;'>Embedded AI for robotics and autonomous vehicle health monitoring.</div>
+                <div style='font-family:{FONT_UI};font-size:12px;color:{TEXT_TERTIARY};line-height:1.5;'>A tiny AI computer that could monitor robots, drones, or self-driving cars in real time.</div>
             </div>
         </div>
     </div>
@@ -1532,7 +1636,7 @@ def render_system_intelligence_page():
     st.markdown(f"""
     <div style='border-top:1px solid {BORDER_MEDIUM};margin-top:40px;padding-top:20px;'>
         <div style='font-family:{FONT_MONO};font-size:10px;color:{TEXT_TERTIARY};text-align:center;'>
-            ApexVitals v3.5 — SRMIST ECE Project | Engineering Architecture Reference
+            ApexVitals v3.5 — SRMIST ECE Project | Built with Python, Streamlit & Gemini AI
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1567,6 +1671,25 @@ def render_heuristic_demo_page(api_key):
 
         st.info("**Expected Root Cause:** " + scenario["expected_root_cause"])
         st.warning("**Expected Risk:** " + scenario["expected_risk_category"])
+
+        # ── Scenario Radar Chart ──
+        iv = scenario["input_vector"]
+        scenario_radar_metrics = {
+            "cpu_usage": iv.get("cpu_usage", 50),
+            "ram_usage": iv.get("ram_usage", 45),
+            "gpu_temp": iv.get("gpu_temperature", 60),
+            "power_plan": iv.get("power_plan", "Balanced"),
+            "gpu_util": iv.get("gpu_load", 50),
+            "vram_percent": round((iv.get("gpu_memory_used", 12) / iv.get("gpu_memory_total", 24)) * 100, 1) if "gpu_memory_used" in iv else 30,
+        }
+        try:
+            import matplotlib.pyplot as plt
+            scenario_radar_fig = generate_svi_radar_chart(scenario_radar_metrics)
+            st.pyplot(scenario_radar_fig, use_container_width=True)
+            plt.close(scenario_radar_fig)
+        except Exception as e:
+            st.warning(f"Radar chart unavailable: {e}")
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col2:
@@ -1618,6 +1741,31 @@ def render_heuristic_demo_page(api_key):
                         </style>
                         """, unsafe_allow_html=True)
                         st.write_stream(stream_word_by_word(result.get('human_readable', '')))
+
+                    # ── SVI Forecast Chart for this scenario ──
+                    try:
+                        import matplotlib.pyplot as plt
+                        # Use scenario SVI of 60, forecast based on risk category
+                        scenario_svi = 60
+                        risk = scenario["expected_risk_category"].upper()
+                        if risk == "CRITICAL":
+                            forecast_svi_val = max(10, scenario_svi - 20)
+                            forecast_trend = "DEGRADE"
+                        elif risk == "WARNING":
+                            forecast_svi_val = max(30, scenario_svi - 10)
+                            forecast_trend = "DEGRADE"
+                        else:
+                            forecast_svi_val = min(100, scenario_svi + 5)
+                            forecast_trend = "STABLE"
+                        forecast_status_val, _ = get_vitality_status(forecast_svi_val)
+                        forecast_fig = generate_svi_forecast_chart(
+                            scenario_svi, forecast_svi_val,
+                            "WARNING", forecast_status_val
+                        )
+                        st.pyplot(forecast_fig, use_container_width=True)
+                        plt.close(forecast_fig)
+                    except Exception as e:
+                        st.warning(f"Forecast chart unavailable: {e}")
 
                     st.divider()
                     st.markdown("#### Validation")
@@ -1905,6 +2053,61 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+        # ── SVI Analytics Charts ──
+        radar_metrics = {
+            "cpu_usage": telemetry["cpu_usage"],
+            "ram_usage": telemetry["ram_usage"],
+            "gpu_temp": gpu_temp,
+            "power_plan": telemetry["power_plan"],
+            "gpu_util": telemetry["gpu"].get("gpu_util") if "error" not in telemetry["gpu"] else None,
+            "vram_percent": telemetry["gpu"].get("vram_percent") if "error" not in telemetry["gpu"] else None,
+        }
+
+        # Radar Chart + SVI Forecast side by side
+        chart_col1, chart_col2 = st.columns([3, 2])
+        with chart_col1:
+            try:
+                radar_fig = generate_svi_radar_chart(radar_metrics)
+                st.pyplot(radar_fig, use_container_width=True)
+                import matplotlib.pyplot as plt
+                plt.close(radar_fig)
+            except Exception as e:
+                st.warning(f"Radar chart unavailable: {e}")
+
+        with chart_col2:
+            # Simple SVI forecast based on session trend
+            try:
+                import matplotlib.pyplot as plt
+                if len(st.session_state.history) >= 3:
+                    recent = st.session_state.history[-5:]
+                    cpu_trend = recent[-1]["cpu"] - recent[0]["cpu"]
+                    ram_trend = recent[-1]["ram"] - recent[0]["ram"]
+                    # Estimate: if CPU/RAM are rising, SVI will drop
+                    svi_delta = -int((cpu_trend * 0.4 + ram_trend * 0.3))
+                    forecast_svi = max(0, min(100, svi + svi_delta))
+                    forecast_status, _ = get_vitality_status(forecast_svi)
+                else:
+                    forecast_svi = svi
+                    forecast_status = svi_status
+                forecast_fig = generate_svi_forecast_chart(
+                    svi, forecast_svi, svi_status, forecast_status
+                )
+                st.pyplot(forecast_fig, use_container_width=True)
+                plt.close(forecast_fig)
+            except Exception as e:
+                st.warning(f"Forecast chart unavailable: {e}")
+
+        # Trend Chart (full width, only if enough history)
+        if len(st.session_state.history) >= 3:
+            try:
+                import matplotlib.pyplot as plt
+                trend_fig = generate_trend_chart(st.session_state.history)
+                if trend_fig:
+                    st.pyplot(trend_fig, use_container_width=True)
+                    plt.close(trend_fig)
+            except Exception as e:
+                st.warning(f"Trend chart unavailable: {e}")
+
         # ── Primary Metrics Row ──
         col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -2141,8 +2344,61 @@ def main():
                 "session_history_length": len(st.session_state.history)
             }
 
+            # Generate all charts for PDF embedding
+            chart_tmp_files = []
+            radar_chart_tmp = None
+            trend_chart_tmp = None
+            forecast_chart_tmp = None
+
             try:
-                pdf_bytes = generate_pdf_report(report)
+                radar_metrics_pdf = {
+                    "cpu_usage": telemetry["cpu_usage"],
+                    "ram_usage": telemetry["ram_usage"],
+                    "gpu_temp": gpu_temp,
+                    "power_plan": telemetry["power_plan"],
+                    "gpu_util": telemetry["gpu"].get("gpu_util") if "error" not in telemetry["gpu"] else None,
+                    "vram_percent": telemetry["gpu"].get("vram_percent") if "error" not in telemetry["gpu"] else None,
+                }
+                radar_fig_pdf = generate_svi_radar_chart(radar_metrics_pdf)
+                radar_chart_tmp = save_chart_to_tempfile(radar_fig_pdf, prefix='apexvitals_radar_')
+                chart_tmp_files.append(radar_chart_tmp)
+            except Exception:
+                radar_chart_tmp = None
+
+            try:
+                if len(st.session_state.history) >= 3:
+                    trend_fig_pdf = generate_trend_chart(st.session_state.history)
+                    if trend_fig_pdf:
+                        trend_chart_tmp = save_chart_to_tempfile(trend_fig_pdf, prefix='apexvitals_trend_')
+                        chart_tmp_files.append(trend_chart_tmp)
+            except Exception:
+                trend_chart_tmp = None
+
+            try:
+                if len(st.session_state.history) >= 3:
+                    recent = st.session_state.history[-5:]
+                    cpu_trend = recent[-1]["cpu"] - recent[0]["cpu"]
+                    ram_trend = recent[-1]["ram"] - recent[0]["ram"]
+                    svi_delta = -int((cpu_trend * 0.4 + ram_trend * 0.3))
+                    forecast_svi_val = max(0, min(100, svi + svi_delta))
+                else:
+                    forecast_svi_val = svi
+                forecast_status_val, _ = get_vitality_status(forecast_svi_val)
+                forecast_fig_pdf = generate_svi_forecast_chart(
+                    svi, forecast_svi_val, svi_status, forecast_status_val
+                )
+                forecast_chart_tmp = save_chart_to_tempfile(forecast_fig_pdf, prefix='apexvitals_forecast_')
+                chart_tmp_files.append(forecast_chart_tmp)
+            except Exception:
+                forecast_chart_tmp = None
+
+            try:
+                pdf_bytes = generate_pdf_report(
+                    report,
+                    radar_chart_path=radar_chart_tmp,
+                    trend_chart_path=trend_chart_tmp,
+                    forecast_chart_path=forecast_chart_tmp
+                )
                 st.download_button(
                     label="📥 EXPORT FORENSIC REPORT (PDF)",
                     data=pdf_bytes,
@@ -2160,6 +2416,14 @@ def main():
                     mime="application/json",
                     use_container_width=True
                 )
+            finally:
+                # Clean up all temporary chart files
+                for tmp_path in chart_tmp_files:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
         else:
             st.info("No diagnosis yet. Click **▶ RUN AI NARRATOR** to start a forensic audit.")
 
@@ -2243,20 +2507,10 @@ def main():
                         st.markdown(user_input)
 
                     if api_key:
-                        result = get_chat_response_streaming(api_key, context_json, user_input, st.session_state.chat_history)
-
-                        if isinstance(result, str):
-                            st.session_state.chat_history.append({"role": "assistant", "content": result})
-                            with st.chat_message("assistant"):
-                                st.markdown(result)
-                        else:
-                            def stream_generator():
-                                for chunk in result:
-                                    if chunk.text:
-                                        yield chunk.text
-                            with st.chat_message("assistant"):
-                                full_response = st.write_stream(stream_generator())
-                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                        stream = get_chat_response_streaming(api_key, context_json, user_input, st.session_state.chat_history)
+                        with st.chat_message("assistant"):
+                            full_response = st.write_stream(stream)
+                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                     else:
                         st.error("API KEY REQUIRED for Neural Chat.")
 
